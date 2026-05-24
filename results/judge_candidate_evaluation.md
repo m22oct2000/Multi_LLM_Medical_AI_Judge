@@ -55,15 +55,14 @@ candidate was graded on four axes:
    prompt to be salvaged.
 
 4. **Vanilla BioMistral-7B** stops cleanly after the first item. With **per-item
-   retry** (one focused prompt per rubric item, which we are adding to
-   `core/wrapper.py`) it goes from 20 % parseable to fully usable.
+   retry** (one focused prompt per rubric item) it goes from 20 % parseable to fully usable.
 
 5. **`medalpaca/medalpaca-7b` is a trap.** It produces 100 % parseable output,
    so a naive grader sees a perfect score — but the rationales are verbatim
    copies of whatever example you gave the model. It should NOT be on the
    judge panel.
 
-## Recommended 4-judge panel for the EMNLP paper
+## Recommended 4-judge panel
 
 | Slot | Judge id | Model | Why |
 |---|---|---|---|
@@ -75,35 +74,23 @@ candidate was graded on four axes:
 This panel:
 
 - Spans three distinct base architectures (Gemma-3, Mistral, LLaMA-2).
-- All four produce parseable output under the new permissive parser
-  (existing 3, plus BioMistral-base via per-item retry).
-- Only `medgemma` is gated, and the user already has an HF token.
+- All four produce parseable output under the permissive parser.
+- Only `medgemma` is gated, and requires an HF token.
 
-### Why not the original paper panel?
+### Why not meditron / BioMedLM?
 
-The repo's existing config (`medgemma + biomistral + meditron + biomedlm`)
-includes two judges (`meditron-7b`, `BioMedLM`) that produced **zero
-parseable scores** in this evaluation. The earlier "real-LLM" agreement
-numbers on those judges were dominated by parse-failure NA fill, not by
-genuine model disagreement (see `results/exp2_agreement_results_realllm.json`
-diagnostics).
+The repo's existing config includes two judges (`meditron-7b`, `BioMedLM`) that produced **zero
+parseable scores** in this evaluation. The earlier agreement numbers on those judges were dominated
+by parse-failure NA fill, not by genuine model disagreement.
 
-### Backup if paper-faithful panel is required
+If keeping these two judges is required for narrative continuity, the only viable fix is:
 
-If keeping the original four judges is non-negotiable for the paper's
-narrative continuity, the only way to make `meditron-7b` and `BioMedLM`
-behave usefully is:
+1. **Constrained decoding** (logits-processor to force a digit token at the scoring position), or
+2. **One-item-per-prompt querying with a 2-shot example pair**, swapping the example pair across
+   calls so the parser cannot mistake echo for judgment.
 
-1. **Constrained decoding** (logits-processor to force a digit token at the
-   scoring position), or
-2. **One-item-per-prompt querying with a 2-shot example pair**, swapping the
-   example pair across calls so the parser cannot mistake echo for judgment.
-
-Both are implemented in the new `core/model_adapters.py` rewrite that ships
-with this PR; expect substantially lower agreement numbers though, because
-the rescued scores will be unstable.
+Both are implemented in `core/model_adapters.py`.
 
 ## Raw evaluation log
 
-`results/judge_candidate_eval.jsonl` — one JSON record per candidate per
-attempt. Includes the full raw model output for inspection.
+`results/judge_candidate_eval.jsonl` — one JSON record per candidate per attempt.
