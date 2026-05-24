@@ -1,140 +1,138 @@
-# Multi-LLM-as-Judge for Clinical QA Evaluation
+# Consensus-Driven Medical Answer Evaluation: A Multi-SLM Judge Framework for Privacy-Preserving, Local Deployment
 
-> **EMNLP 2026 research repository** - studying whether small, locally hosted
-> medical LLMs can act as reliable judges for broad clinical question answering,
-> and how judge agreement changes with rubric choice and scoring scale.
+> **EMNLP 2026 Long Paper Submission** -- studying whether panels of locally
+> deployed small language models (SLMs) can reliably evaluate medical answer
+> quality, and how rubric design and scoring scale jointly affect inter-judge
+> consensus.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![EMNLP 2026](https://img.shields.io/badge/Venue-EMNLP%202026-green)]()
 
-Working paper title:
+Code for the paper:
 
-> **"Small Medical LLMs as Local Judges: Rubric and Scoring Sensitivity in Clinical QA Evaluation"**
+> **"Consensus-Driven Medical Answer Evaluation: A Multi-SLM Judge Framework
+> for Privacy-Preserving, Local Deployment"**
 
-Companion general-purpose framework: [Multi-LLMs-as-Judge](https://github.com/m22oct2000/Multi-LLMs-as-Judge)
+```
+https://github.com/mmm-byte/Multi_LLM_Medical_AI_Judge
+```
 
 ---
 
 ## Research Overview
 
-Cloud-based frontier models are not always acceptable judges for medical AI:
-clinical text can be sensitive, and hospitals/HPC groups often need local
-evaluation workflows. This repository tests a privacy-preserving alternative:
-use 3-4 small medical LLMs, each near or below 7B parameters, as a local judge
-panel for clinical QA answers.
-
-The project asks:
+Cloud-based frontier models carry HIPAA compliance risks and are unavailable in
+offline or bandwidth-constrained clinical environments. This repository
+implements **Multi-SLMs-as-Judge**: a privacy-preserving framework that assembles
+a panel of locally deployed SLMs, measures inter-judge consensus, and routes
+disagreements to human review rather than silently delivering an unreliable score.
 
 | # | Research Question |
 |---|---|
-| RQ1 | Do small local medical LLM judges agree with each other on clinical QA answer quality? |
-| RQ2 | Which rubric produces the most stable inter-judge agreement? |
-| RQ3 | Does scoring scale change agreement when rubric content is held constant? |
-| RQ4 | Do agreement patterns differ across clinical domains such as emergency care, pharmacology, and pediatrics? |
-
-Key design decisions:
-
-- **Small local judges only**: models are intended for vLLM/FastAPI deployment on local GPU/HPC resources.
-- **Context-window aware prompts**: prompts are intentionally short because 7B-class medical models and BioMedLM have limited context windows.
-- **No mediator/correction loop**: this repo studies agreement, disagreement, and rubric sensitivity; it does not try to repair answers.
-- **Human/reference-answer datasets**: source CSV support is provided for MedQuAD, MedDialog, and Medical Meadow style datasets copied from the companion repo.
-- **Deterministic microbenchmark**: a built-in short benchmark keeps tests and examples reproducible without downloading large datasets.
+| RQ1 | Which rubric gives the most consistent judge agreement at its natural scoring scale? |
+| RQ2 | How does scoring scale change agreement when rubric content is held constant? |
+| RQ3 | Do agreement patterns differ across clinical specialties? |
 
 ---
 
-## Benchmark Scope
+## Framework: Two-Stage Pipeline
 
-The active paper direction is **broad clinical QA**, not ADRD-only.
+The pipeline has a strict order (paper Sec 3 / Fig. 1):
 
-The default benchmark uses five clinical domains:
+**Stage 1 -- Compute Agr (Eq. 1):** pairwise agreement across all N judges:
 
-| Domain | Example focus |
-|---|---|
-| Cardiology | STEMI, ACS chest pain, atrial fibrillation |
-| Pharmacology | metformin, warfarin, opioid overdose |
-| Neurology | stroke, seizures, Alzheimer disease |
-| Pediatrics | febrile seizures, otitis media, dehydration |
-| Emergency | anaphylaxis, sepsis, tension pneumothorax |
-
-`benchmark_dataset/build_agreement_dataset.py` writes a small-context CSV with
-balanced showcase rows for:
-
-- `fully_agree`
-- `majority_agree` (partial agreement with one likely outlier)
-- `split` (neutral/borderline disagreement: two-vs-two or unclear majority)
-- `full_disagree`
-
-The script also has an optional source-data mode:
-
-```bash
-USE_SOURCE_DATASETS=1 python3 benchmark_dataset/build_agreement_dataset.py
+```
+Agr = (2 / N(N-1)) * sum_{i<j} sum_k (1 - |s_ik - s_jk| / kappa_k)
 ```
 
-That mode reads CSV files placed in `benchmark_dataset/source_datasets/`, keeps
-rows that fit the small-model token budget, classifies them into the five
-domains, and assigns transparent heuristic expected labels. This is intended for
-human/reference-answer datasets copied from the companion repository.
+where kappa_k is the maximum achievable score for criterion k, normalising
+differences to [0, 1]. Agr in [0, 1].
+
+**Stage 2 -- Routing gate:** four levels based on configurable thresholds:
+
+| Level | Condition | Action |
+|---|---|---|
+| Full Agreement (FA) | Agr >= 0.95 | Compute and deliver S |
+| Majority Agreement (MA) | 0.75 <= Agr < 0.95 | Compute and deliver S with note |
+| Split (SP) | 0.50 <= Agr < 0.75 | Route to human reviewer |
+| Disagree (D) | Agr < 0.50 | Escalate to domain expert |
+
+**S is only reported when Agr >= MA (0.75).** Below that threshold the system
+raises an alert with per-judge outputs for human review.
+
+**Stage 3 -- Compute S (Eq. 2):** weighted quality score in [0, 1]:
+
+```
+S = (1/N) * sum_i  [sum_k w_k * (s_ik / kappa_k)] / [sum_k w_k]
+```
+
+Three outlier strategies available: *include* (equal weights), *remove* (drop
+most deviant judge), *downweight* (outlier weight x 0.5).
+
+---
+
+## Benchmark
+
+100 questions drawn from MedQuAD, MedDialog, and Medical Meadow, balanced
+across five clinical domains (20 questions each):
+
+| Domain | Example Topics |
+|---|---|
+| Cardiology | atrial fibrillation, heart failure, STEMI |
+| Pharmacology | warfarin, drug interactions, dosing |
+| Neurology | stroke, Alzheimer disease, seizures |
+| Pediatrics | otitis media, dehydration, febrile seizures |
+| Emergency | anaphylaxis, sepsis, tension pneumothorax |
 
 ---
 
 ## Rubrics
 
-The experiments use **four published rubric families plus one controlled
-scoring variant**:
+Five rubrics -- four published instruments plus one controlled scoring variant:
 
-| Rubric | Type | Purpose |
-|---|---|---|
-| `rubric1_pemat.json` | Binary | Patient-facing understandability/actionability |
-| `rubric2_healthbench.json` | Binary | Clinical correctness, safety, escalation, uncertainty |
-| `rubric3_clinical_eval.json` | Likert 1-5 | Expert-review dimensions: accuracy, safety, relevance, completeness, clarity |
-| `rubric4_prometheus.json` | Likert 1-5 | General LLM-as-judge dimensions: instruction following, factuality, coherence, completeness |
-| `rubric5_pemat_likert.json` | Likert 1-5 variant | Controlled scoring-scale test: same PEMAT criteria as rubric 1, but Likert instead of binary |
+| ID | File | Scale | Purpose |
+|---|---|---|---|
+| R1 | `rubric1_pemat.json` | Binary | Patient-facing understandability / actionability (PEMAT) |
+| R2 | `rubric2_healthbench.json` | Binary | Clinical correctness, safety, escalation, uncertainty (HealthBench) |
+| R3 | `rubric3_clinical_eval.json` | Likert 1-5 | Accuracy, safety, relevance, completeness, clarity (ClinicalEval) |
+| R4 | `rubric4_prometheus.json` | Likert 1-5 | Instruction-following, factuality, coherence, completeness (Prometheus) |
+| R5 | `rubric5_pemat_likert.json` | Likert 1-5 | Same PEMAT criteria as R1 -- controlled scale comparison |
 
-Rubric 5 is **not a fifth independent published instrument**. It is a controlled
-variant used to isolate scoring-scale effects:
-
-> same PEMAT criteria + different scoring scale = direct test of whether binary
-> scoring yields higher agreement than Likert scoring.
+R5 isolates the scale effect: identical criteria, different scale => direct
+test of binary vs. Likert agreement.
 
 ---
 
 ## Judge Panel
 
-The target judge panel is 3-4 small medical/domain LLMs:
+Four locally deployable SLMs spanning three distinct base architectures
+(paper Sec 4):
 
-| Judge ID | Model | Backend |
+| Judge ID | Model | Reference |
 |---|---|---|
-| `medgemma` | `google/medgemma-4b-it` | vLLM chat endpoint |
-| `biomistral` | `BioMistral/BioMistral-7B` | vLLM completion endpoint |
-| `meditron` | `epfl-llm/meditron-7b` | vLLM completion endpoint |
-| `biomedlm` | `stanford-crfm/BioMedLM` | local FastAPI completion endpoint |
+| `medgemma` | `google/medgemma-4b-it` | sellergren2025medgemma |
+| `biomistral` | `BioMistral/BioMistral-7B-DARE` | labrak2024biomistral |
+| `meditron` | `epfl-llm/meditron-7b` | chen2023meditron70b |
+| `medalpaca` | `medalpaca/medalpaca-7b` | han2023medalpaca |
 
-The adapters in `core/model_adapters.py` deliberately use short prompts and
-pipe-format outputs so the smaller context windows remain usable.
+All models are served via local vLLM / FastAPI endpoints -- no data leaves
+your infrastructure.
 
 ---
 
-## Agreement Classification
+## Agreement Thresholds (paper Sec 4)
 
-For every question-answer-rubric triple, the framework calls each judge,
-parses item-level scores, computes pairwise agreement, and classifies the panel:
+Calibrated for a four-judge panel:
 
-| Class | Meaning |
-|---|---|
-| `fully_agree` | All judges are above the agreement threshold with each other |
-| `majority_agree` | Most judges agree and one judge is an outlier |
-| `split` | No clear majority; useful as a neutral/borderline ambiguity signal |
-| `full_disagree` | Judges broadly diverge |
-| `skipped` | Too few judge endpoints responded |
+| Threshold | Value | Meaning |
+|---|---|---|
+| FA | 0.95 | Near-unanimous; virtually no systematic disagreement |
+| MA | 0.75 | Supermajority; panel broadly converges even if one judge diverges |
+| SP | 0.50 | Coin-flip boundary; no stable majority below this point |
 
-Run a no-LLM walkthrough:
-
-```bash
-python3 experiments/demo_agreement_showcases.py
-```
-
-This prints examples of full agreement, partial/majority agreement, neutral
-split, and full disagreement without requiring GPUs.
+Thresholds are fully configurable via `agreement_thresholds` in the experiment
+config JSON. Two or more thresholds set to the same value merge the corresponding
+levels.
 
 ---
 
@@ -142,21 +140,20 @@ split, and full disagreement without requiring GPUs.
 
 ```text
 core/
-  wrapper.py                 # Judge-panel orchestration
+  wrapper.py                 # Judge-panel orchestration (3-stage scoring)
   model_adapters.py          # Per-model prompt/parse adapters
-  rubric_engine.py           # Score aggregation and pairwise agreement
-  agreement.py               # Panel agreement taxonomy
+  rubric_engine.py           # Agr (Eq.1), S (Eq.2), outlier strategies
+  agreement.py               # Panel agreement taxonomy and routing gate
   consensus_core/            # Dataclasses, event log, in-memory store
 
 config/
-  endpoint_config.py         # Default local judge endpoints
+  endpoint_config.py         # Default local judge endpoints (4 SLMs)
   llm_client.py              # Lightweight OpenAI-compatible HTTP client
-  configs/                   # Experiment configs
+  configs/                   # Per-experiment JSON configs
 
 benchmark_dataset/
-  build_agreement_dataset.py # Reproducible benchmark + optional source CSV ingestion
-  build_adrd_questions.py    # Legacy filename builder for Exp3 JSON input
-  source_datasets/           # Place companion-repo/human-reference CSVs here
+  build_agreement_dataset.py # Reproducible 100-Q benchmark builder
+  source_datasets/           # Place MedQuAD / MedDialog / Medical Meadow CSVs here
 
 rubrics/
   rubric1_pemat.json
@@ -166,11 +163,11 @@ rubrics/
   rubric5_pemat_likert.json
 
 experiments/
-  demo_agreement_showcases.py
-  exp1_dataset_analysis.py
-  exp2_agreement_analysis.py
-  exp3_rubric_sensitivity.py
-  exp4_boxplot_agreement.py
+  demo_agreement_showcases.py   # No-LLM walkthrough of all agreement levels
+  exp1_dataset_analysis.py      # Table 1: rubric results at default scale
+  exp2_agreement_analysis.py    # Table 2: scoring-scale sensitivity
+  exp3_rubric_sensitivity.py    # Table 3: agreement by clinical domain
+  exp4_boxplot_agreement.py     # Box-plot figures (reads Exp2 output)
 
 tests/
   test_core.py
@@ -185,52 +182,56 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# No LLM required
+# No LLM required -- runs tests, builds benchmark, walks through agreement levels
 python3 tests/test_core.py
 python3 benchmark_dataset/build_agreement_dataset.py
-python3 benchmark_dataset/build_adrd_questions.py
 python3 experiments/demo_agreement_showcases.py
 
-# Full local/HPC pipeline, after judge endpoints are running
+# Full pipeline (requires judge endpoints on ports 8001-8004)
 bash run_all.sh
 ```
-
-LLM experiments require local judge endpoints on ports 8001-8004 as configured
-in `config/configs/config_exp2_agreement.json`.
 
 ---
 
 ## Experiments
 
-| Experiment | Script | Requires LLMs? | Output |
+| Experiment | Script | Requires LLMs? | Paper Table |
 |---|---|---|---|
-| Exp1 | `experiments/exp1_dataset_analysis.py` | No | dataset table and JSON |
-| Exp2 | `experiments/exp2_agreement_analysis.py` | Yes | per-rubric judge results and rationales |
-| Exp3 | `experiments/exp3_rubric_sensitivity.py` | Yes | scoring-scale sensitivity results |
-| Exp4 | `experiments/exp4_boxplot_agreement.py` | No, reads Exp2 | PNG box plots and plot data |
-| Demo | `experiments/demo_agreement_showcases.py` | No | console walkthrough of agreement classes |
+| Exp1 | `experiments/exp1_dataset_analysis.py` | No | Table 1 (default-scale results) |
+| Exp2 | `experiments/exp2_agreement_analysis.py` | Yes | Table 2 (scale sensitivity) |
+| Exp3 | `experiments/exp3_rubric_sensitivity.py` | Yes | Table 3 (domain breakdown) |
+| Exp4 | `experiments/exp4_boxplot_agreement.py` | No (reads Exp2) | Figures |
+| Demo | `experiments/demo_agreement_showcases.py` | No | -- |
 
 ---
 
-## Paper Positioning
+## Key Findings
 
-Recommended main claim:
-
-> Small local medical LLM judges are feasible for privacy-preserving clinical QA
-> evaluation, but their apparent reliability depends strongly on rubric wording
-> and scoring scale.
-
-Important limitations to report clearly:
-
-- LLM-judge agreement is not the same as clinical correctness.
-- The deterministic benchmark labels are heuristic priors, not physician gold labels.
-- Human/reference-answer datasets strengthen the setting, but an expert-labeled subset is still recommended for final paper claims.
-- Small-model context windows force shorter rubrics/prompts, which is part of the practical deployment trade-off studied here.
+- Binary rubrics consistently yield higher inter-judge agreement (PEMAT 94.1%,
+  HealthBench 91.3%) than Likert-scale rubrics (ClinicalEval 80.9%,
+  Prometheus 74.0%, PEMAT-Likert 72.2%).
+- PEMAT vs PEMAT-Likert (identical criteria, different scale) isolates the scale
+  effect: switching from binary to Likert 1-5 drops mean agreement by 22 pp.
+- Cardiology is the most consistently judged domain (36% Full Agreement,
+  0 Full Disagreements); Pharmacology is the most contested (20% FA, 38%
+  combined Split + Full Disagreement).
+- Pharmacology contention is driven primarily by Likert-scale rubrics (ClinicalEval
+  13, PEMAT-Likert 14 split/disagree cases); binary rubrics show only 2-3 even
+  in this domain.
 
 ---
 
 ## Ethical Considerations
 
 This repository is research infrastructure for evaluating clinical NLP systems.
-It does not provide, endorse, or validate medical advice. Any clinical use would
-require expert review, prospective validation, and appropriate regulatory review.
+It does not provide, endorse, or validate medical advice. All benchmark questions
+are drawn from publicly available datasets. Any clinical deployment would require
+physician validation and regulatory review.
+
+All experiments use locally deployed models -- no patient-identifiable text is
+transmitted to external services, consistent with HIPAA and institutional
+data-governance principles.
+
+To support reproducibility, code, prompts, and evaluation scripts are released
+here. Model checkpoints are not redistributed and must be obtained from their
+original sources in compliance with their respective licences.

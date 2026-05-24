@@ -1,6 +1,6 @@
 {
   "experiment": "exp2_agreement_analysis",
-  "description": "Run all small local medical judges on broad clinical QA rows under four published rubrics plus the PEMAT-Likert controlled scoring variant. Classify agreement per question across 5 clinical domains.",
+  "description": "Run all four locally-deployed SLM judges on the 100-question benchmark under five rubrics (PEMAT, HealthBench, ClinicalEval, Prometheus, PEMAT-Likert). Classify panel agreement per question across five clinical domains. Matches paper Table 1 (Exp1) and Table 2 (Exp2).",
   "judges": [
     {
       "id": "medgemma",
@@ -9,7 +9,7 @@
     },
     {
       "id": "biomistral",
-      "model": "BioMistral/BioMistral-7B",
+      "model": "BioMistral/BioMistral-7B-DARE",
       "url": "http://localhost:8002"
     },
     {
@@ -38,7 +38,11 @@
     "Pediatrics",
     "Emergency"
   ],
-  "agreement_threshold": 80.0,
+  "agreement_thresholds": {
+    "FA": 0.95,
+    "MA": 0.75,
+    "SP": 0.50
+  },
   "temperature": 0.0,
   "max_tokens": 1024,
   "timeout_seconds": 120,
