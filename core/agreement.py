@@ -1,43 +1,26 @@
-"""Agreement classification for the Multi-SLMs-as-Judge clinical panel.
+# inter-judge agreement helpers for the clinical judge panel
+# Agr formula is from Eq.1 in the paper - basically normalised pairwise
+# distance averaged over all judge pairs and all rubric criteria.
+#
+# four routing levels:
+#   full_agree    >= 0.95
+#   majority_agree  0.75 - 0.95
+#   split           0.50 - 0.75
+#   disagree      < 0.50
+#
+# S is only reported when Agr >= 0.75 (MA threshold). below that we don't
+# trust the panel enough to give a score.
 
-Implements the paper's Agr metric (Eq. 1) and four routing levels:
-
-  Agr = (2 / N(N-1)) * sum_{i<j} sum_k (1 - |s_ik - s_jk| / kappa_k)
-
-where kappa_k is the maximum achievable score for criterion k,
-normalising each per-criterion difference to [0, 1].
-Consequently Agr in [0, 1].
-
-Four agreement levels (paper Sec 4 / routing gate):
-  Full Agreement  (FA) : Agr >= FA_THRESHOLD  (default 0.95)
-  Majority Agreement   : MA_THRESHOLD <= Agr < FA_THRESHOLD (default 0.75)
-  Split          (SP)  : SP_THRESHOLD <= Agr < MA_THRESHOLD  (default 0.50)
-  Disagree        (D)  : Agr < SP_THRESHOLD
-
-Only when Agr >= MA_THRESHOLD does the framework compute and deliver the
-quality score S (see rubric_engine.compute_quality_score).
-"""
 from __future__ import annotations
-
 from itertools import combinations
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
-# Paper Sec 4: threshold calibration for a 4-judge panel
-FA_THRESHOLD: float = 0.95   # Full Agreement
-MA_THRESHOLD: float = 0.75   # Majority Agreement gate (Agr >= MA => report S)
-SP_THRESHOLD: float = 0.50   # Split boundary
+FA_THRESHOLD = 0.95
+MA_THRESHOLD = 0.75
+SP_THRESHOLD = 0.50
 
 
-def classify_agreement_level(
-    agr: float,
-    fa: float = FA_THRESHOLD,
-    ma: float = MA_THRESHOLD,
-    sp: float = SP_THRESHOLD,
-) -> str:
-    """Map a scalar Agr in [0,1] to one of the four paper routing levels.
-
-    Returns one of: 'full_agree' | 'majority_agree' | 'split' | 'disagree'
-    """
+def classify_agreement_level(agr, fa=FA_THRESHOLD, ma=MA_THRESHOLD, sp=SP_THRESHOLD):
     if agr >= fa:
         return "full_agree"
     if agr >= ma:
@@ -47,121 +30,72 @@ def classify_agreement_level(
     return "disagree"
 
 
-def compute_agr(
-    judge_scores: Dict[str, Dict[str, float]],
-    kappa: Dict[str, float],
-) -> float:
-    """Compute paper Eq. 1 pairwise agreement Agr in [0, 1].
+def compute_agr(judge_scores, kappa):
+    """Eq.1 - pairwise agreement in [0,1].
 
-    Parameters
-    ----------
-    judge_scores : {judge_id: {criterion_id: score}}
-        Per-judge, per-criterion raw scores. Missing or NA items are skipped.
-    kappa : {criterion_id: max_achievable_score}
-        Maximum achievable score for each criterion (normalisation denominator).
+    judge_scores: {judge_id: {criterion_id: raw_score}}
+    kappa:        {criterion_id: max_possible_score}
 
-    Returns
-    -------
-    float
-        Agr in [0, 1]; 1.0 = perfect consensus, 0.0 = maximal disagreement.
-        Returns 1.0 if fewer than 2 judges are present.
+    returns 1.0 if fewer than 2 judges (trivially agreed).
     """
     judge_ids = list(judge_scores.keys())
-    n = len(judge_ids)
-    if n < 2:
+    if len(judge_ids) < 2:
         return 1.0
 
-    pairs = list(combinations(judge_ids, 2))
-    total_weight = 0.0
-    weighted_agreement = 0.0
-
-    for ji, jj in pairs:
-        scores_i = judge_scores[ji]
-        scores_j = judge_scores[jj]
-        common_criteria = [
-            k for k in kappa
-            if k in scores_i and k in scores_j
-            and scores_i[k] is not None
-            and scores_j[k] is not None
-        ]
-        for k in common_criteria:
-            kap = kappa[k]
+    total = 0.0
+    agree = 0.0
+    for ji, jj in combinations(judge_ids, 2):
+        si = judge_scores[ji]
+        sj = judge_scores[jj]
+        for k, kap in kappa.items():
+            if k not in si or k not in sj:
+                continue
+            if si[k] is None or sj[k] is None:
+                continue
             if kap <= 0:
                 continue
-            diff = abs(scores_i[k] - scores_j[k]) / kap
-            weighted_agreement += 1.0 - diff
-            total_weight += 1.0
+            agree += 1.0 - abs(si[k] - sj[k]) / kap
+            total += 1.0
 
-    if total_weight == 0.0:
-        return 0.0
-
-    return weighted_agreement / total_weight
+    return 0.0 if total == 0.0 else agree / total
 
 
-def identify_outlier(
-    judge_scores: Dict[str, Dict[str, float]],
-    kappa: Dict[str, float],
-) -> Optional[str]:
-    """Return the judge ID whose mean pairwise agreement with others is lowest.
-
-    Returns None if all judges agree or fewer than 3 judges are present.
+def identify_outlier(judge_scores, kappa):
+    """find whichever judge is most out of step with the rest.
+    returns None if < 3 judges or no clear outlier (gap < 0.10).
     """
-    judge_ids = list(judge_scores.keys())
-    if len(judge_ids) < 3:
+    ids = list(judge_scores.keys())
+    if len(ids) < 3:
         return None
 
-    mean_agr_with_others: Dict[str, float] = {}
-    for ji in judge_ids:
-        others = [j for j in judge_ids if j != ji]
-        agr_vals = [
-            compute_agr({ji: judge_scores[ji], jj: judge_scores[jj]}, kappa)
-            for jj in others
-        ]
-        mean_agr_with_others[ji] = sum(agr_vals) / len(agr_vals) if agr_vals else 1.0
+    mean_agr = {}
+    for ji in ids:
+        others = [j for j in ids if j != ji]
+        vals = [compute_agr({ji: judge_scores[ji], jj: judge_scores[jj]}, kappa)
+                for jj in others]
+        mean_agr[ji] = sum(vals) / len(vals)
 
-    min_judge = min(mean_agr_with_others, key=mean_agr_with_others.get)
-    sorted_vals = sorted(mean_agr_with_others.values(), reverse=True)
-    if len(sorted_vals) >= 2 and sorted_vals[0] - mean_agr_with_others[min_judge] > 0.10:
-        return min_judge
+    worst = min(mean_agr, key=mean_agr.get)
+    best_val = sorted(mean_agr.values(), reverse=True)[0]
+    if best_val - mean_agr[worst] > 0.10:
+        return worst
     return None
 
 
-def summarize_agreement(
-    judge_scores: Dict[str, Dict[str, float]],
-    kappa: Dict[str, float],
-    fa: float = FA_THRESHOLD,
-    ma: float = MA_THRESHOLD,
-    sp: float = SP_THRESHOLD,
-) -> Dict:
-    """Return a full summary dict suitable for JSON results output.
-
-    Parameters
-    ----------
-    judge_scores : {judge_id: {criterion_id: score}}
-    kappa        : {criterion_id: max_achievable_score}
-    fa, ma, sp   : routing thresholds (paper defaults: 0.95, 0.75, 0.50)
-
-    Returns
-    -------
-    dict with keys:
-      agr              - scalar Agr in [0, 1]
-      agreement_level  - 'full_agree' | 'majority_agree' | 'split' | 'disagree'
-      outlier_judge    - judge ID or None
-      report_score     - bool: True only when Agr >= MA (score delivery gate)
-      thresholds       - {FA, MA, SP} values used
-      pairwise_agr     - per-pair Agr values
+def summarize_agreement(judge_scores, kappa,
+                        fa=FA_THRESHOLD, ma=MA_THRESHOLD, sp=SP_THRESHOLD):
+    """run compute_agr + classify + outlier detection and bundle into a dict
+    that gets written to the results JSON.
     """
-    judge_ids = list(judge_scores.keys())
+    ids = list(judge_scores.keys())
     agr = compute_agr(judge_scores, kappa)
     level = classify_agreement_level(agr, fa, ma, sp)
     outlier = identify_outlier(judge_scores, kappa)
 
     pairwise = {}
-    for ji, jj in combinations(judge_ids, 2):
-        pair_agr = compute_agr(
-            {ji: judge_scores[ji], jj: judge_scores[jj]}, kappa
-        )
-        pairwise[f"{ji}|{jj}"] = round(pair_agr, 4)
+    for ji, jj in combinations(ids, 2):
+        v = compute_agr({ji: judge_scores[ji], jj: judge_scores[jj]}, kappa)
+        pairwise[f"{ji}|{jj}"] = round(v, 4)
 
     return {
         "agr": round(agr, 4),

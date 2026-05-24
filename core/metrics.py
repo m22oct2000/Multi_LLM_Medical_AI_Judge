@@ -1,71 +1,58 @@
-"""Structured logging and metrics collection for clinical QA judge runs."""
-
-from __future__ import annotations
+# metrics / logging for judge runs
+# nothing fancy - just dataclasses + an in-memory collector
+# results get written out as JSON at the end of each experiment
 
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s %(name)s %(levelname)s %(message)s'
 )
 
 
 @dataclass
 class EvalRecord:
-    """One record per (question, rubric, judge) evaluation."""
     timestamp: str
     question_id: str
     rubric_id: str
     rubric_name: str
     judge_id: str
     aggregate_score: float
-    rationales: Dict[str, str]   # {rubric_item_id: rationale text}
+    rationales: Dict[str, str]
     latency_ms: float
     status: str
     error: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self):
         return asdict(self)
 
 
 @dataclass
 class AgreementRecord:
-    """Pairwise agreement between two judges on one question under one rubric."""
     timestamp: str
     question_id: str
     rubric_id: str
     judge_a: str
     judge_b: str
-    agreement_score: float    # 0.0 - 100.0
-    agreement_class: str      # fully_agree / majority_agree / split / full_disagree
+    agreement_score: float
+    agreement_class: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self):
         return asdict(self)
 
 
 class MetricsCollector:
-    """In-memory collector for eval and agreement records."""
 
-    def __init__(self) -> None:
+    def __init__(self):
         self.eval_records: List[EvalRecord] = []
         self.agreement_records: List[AgreementRecord] = []
-        self.logger = logging.getLogger("clinical_judge_metrics")
+        self.logger = logging.getLogger('clinical_judge_metrics')
 
-    def record_eval(
-        self,
-        question_id: str,
-        rubric_id: str,
-        rubric_name: str,
-        judge_id: str,
-        aggregate_score: float,
-        rationales: Dict[str, str],
-        latency_ms: float,
-        status: str,
-        error: Optional[str] = None,
-    ) -> None:
+    def record_eval(self, question_id, rubric_id, rubric_name, judge_id,
+                    aggregate_score, rationales, latency_ms, status, error=None):
         rec = EvalRecord(
             timestamp=datetime.utcnow().isoformat(),
             question_id=question_id,
@@ -79,23 +66,10 @@ class MetricsCollector:
             error=error,
         )
         self.eval_records.append(rec)
-        log_level = logging.ERROR if error else logging.INFO
-        self.logger.log(
-            log_level,
-            f"[{rubric_name}] Q={question_id} J={judge_id}: score={aggregate_score:.2f} "
-            f"latency={latency_ms:.0f}ms status={status}"
-            + (f" error={error}" if error else ""),
-        )
+        self.logger.info(f'eval recorded: {judge_id} Q={question_id} score={aggregate_score:.2f}')
 
-    def record_agreement(
-        self,
-        question_id: str,
-        rubric_id: str,
-        judge_a: str,
-        judge_b: str,
-        agreement_score: float,
-        agreement_class: str,
-    ) -> None:
+    def record_agreement(self, question_id, rubric_id, judge_a, judge_b,
+                         agreement_score, agreement_class):
         rec = AgreementRecord(
             timestamp=datetime.utcnow().isoformat(),
             question_id=question_id,
@@ -107,21 +81,20 @@ class MetricsCollector:
         )
         self.agreement_records.append(rec)
         self.logger.info(
-            f"[Agreement] Q={question_id} Rubric={rubric_id} "
-            f"{judge_a}<>{judge_b}: {agreement_score:.1f}% ({agreement_class})"
+            f'agreement: {judge_a}|{judge_b} Q={question_id} '
+            f'agr={agreement_score:.4f} -> {agreement_class}'
         )
 
-    def get_eval_records(self) -> List[Dict[str, Any]]:
+    def get_eval_records(self):
         return [r.to_dict() for r in self.eval_records]
 
-    def get_agreement_records(self) -> List[Dict[str, Any]]:
+    def get_agreement_records(self):
         return [r.to_dict() for r in self.agreement_records]
 
 
-_collector: Optional[MetricsCollector] = None
+_collector = None
 
-
-def get_metrics_collector() -> MetricsCollector:
+def get_metrics_collector():
     global _collector
     if _collector is None:
         _collector = MetricsCollector()

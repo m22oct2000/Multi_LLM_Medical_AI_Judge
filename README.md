@@ -1,237 +1,136 @@
-# Consensus-Driven Medical Answer Evaluation: A Multi-SLM Judge Framework for Privacy-Preserving, Local Deployment
+# Multi-SLM Medical AI Judge
 
-> **EMNLP 2026 Long Paper Submission** -- studying whether panels of locally
-> deployed small language models (SLMs) can reliably evaluate medical answer
-> quality, and how rubric design and scoring scale jointly affect inter-judge
-> consensus.
+Code for the paper *"Consensus-Driven Medical Answer Evaluation: A Multi-SLM Judge Framework for Privacy-Preserving, Local Deployment"* (EMNLP 2026 submission).
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![EMNLP 2026](https://img.shields.io/badge/Venue-EMNLP%202026-green)]()
-
-Code for the paper:
-
-> **"Consensus-Driven Medical Answer Evaluation: A Multi-SLM Judge Framework
-> for Privacy-Preserving, Local Deployment"**
-
-```
-https://github.com/mmm-byte/Multi_LLM_Medical_AI_Judge
-```
+The core idea: instead of sending clinical QA answers to a cloud model for evaluation (HIPAA risk, no offline support), run a panel of small locally-deployed medical LLMs and only report a quality score when the panel sufficiently agrees. When they disagree, route to a human reviewer.
 
 ---
 
-## Research Overview
+## Why bother with consensus?
 
-Cloud-based frontier models carry HIPAA compliance risks and are unavailable in
-offline or bandwidth-constrained clinical environments. This repository
-implements **Multi-SLMs-as-Judge**: a privacy-preserving framework that assembles
-a panel of locally deployed SLMs, measures inter-judge consensus, and routes
-disagreements to human review rather than silently delivering an unreliable score.
-
-| # | Research Question |
-|---|---|
-| RQ1 | Which rubric gives the most consistent judge agreement at its natural scoring scale? |
-| RQ2 | How does scoring scale change agreement when rubric content is held constant? |
-| RQ3 | Do agreement patterns differ across clinical specialties? |
+A single judge model can be confidently wrong. Running four models and checking whether they land in the same region gives a cheap signal of when to trust the automated score vs. when to flag it. The threshold we use (Agr >= 0.75) was calibrated on the validation split - below that, precision drops enough that automated scores aren't worth trusting on their own.
 
 ---
 
-## Framework: Two-Stage Pipeline
+## How it works
 
-The pipeline has a strict order (paper Sec 3 / Fig. 1):
+**Step 1 - Score.** Each of the four judge models scores the answer independently on all rubric criteria. Three-stage prompting handles models that fail to score all items in one batch (per-item retry, then a minimal single-criterion fallback).
 
-**Stage 1 -- Compute Agr (Eq. 1):** pairwise agreement across all N judges:
+**Step 2 - Compute Agr.** Pairwise agreement across all N judges (Eq.1 from the paper):
 
 ```
 Agr = (2 / N(N-1)) * sum_{i<j} sum_k (1 - |s_ik - s_jk| / kappa_k)
 ```
 
-where kappa_k is the maximum achievable score for criterion k, normalising
-differences to [0, 1]. Agr in [0, 1].
+Each criterion difference is divided by its max possible score so binary and Likert rubrics are comparable. Agr is in [0, 1].
 
-**Stage 2 -- Routing gate:** four levels based on configurable thresholds:
+**Step 3 - Route.**
 
-| Level | Condition | Action |
+| Level | Range | Action |
 |---|---|---|
-| Full Agreement (FA) | Agr >= 0.95 | Compute and deliver S |
-| Majority Agreement (MA) | 0.75 <= Agr < 0.95 | Compute and deliver S with note |
-| Split (SP) | 0.50 <= Agr < 0.75 | Route to human reviewer |
-| Disagree (D) | Agr < 0.50 | Escalate to domain expert |
+| Full Agreement | Agr >= 0.95 | report S |
+| Majority Agreement | 0.75 - 0.95 | report S with note |
+| Split | 0.50 - 0.75 | flag for human review |
+| Disagree | < 0.50 | escalate to domain expert |
 
-**S is only reported when Agr >= MA (0.75).** Below that threshold the system
-raises an alert with per-judge outputs for human review.
-
-**Stage 3 -- Compute S (Eq. 2):** weighted quality score in [0, 1]:
+**Step 4 - Compute S (only when Agr >= 0.75).**
 
 ```
-S = (1/N) * sum_i  [sum_k w_k * (s_ik / kappa_k)] / [sum_k w_k]
+S = (1/N) * sum_i [ sum_k w_k * (s_ik / kappa_k) ] / [ sum_k w_k ]
 ```
 
-Three outlier strategies available: *include* (equal weights), *remove* (drop
-most deviant judge), *downweight* (outlier weight x 0.5).
+If there's an outlier judge (one model clearly out of step with the other three) you can remove or downweight it before computing S.
 
 ---
 
-## Benchmark
+## Judges
 
-100 questions drawn from MedQuAD, MedDialog, and Medical Meadow, balanced
-across five clinical domains (20 questions each):
+Four models, all locally deployable, spanning different training backgrounds:
 
-| Domain | Example Topics |
-|---|---|
-| Cardiology | atrial fibrillation, heart failure, STEMI |
-| Pharmacology | warfarin, drug interactions, dosing |
-| Neurology | stroke, Alzheimer disease, seizures |
-| Pediatrics | otitis media, dehydration, febrile seizures |
-| Emergency | anaphylaxis, sepsis, tension pneumothorax |
+| id | model | paper ref |
+|---|---|---|
+| medgemma | google/medgemma-4b-it | sellergren2025medgemma |
+| biomistral | BioMistral/BioMistral-7B-DARE | labrak2024biomistral |
+| meditron | epfl-llm/meditron-7b | chen2023meditron70b |
+| medalpaca | medalpaca/medalpaca-7b | han2023medalpaca |
+
+Each runs behind a local vLLM server. No data leaves your machine.
 
 ---
 
 ## Rubrics
 
-Five rubrics -- four published instruments plus one controlled scoring variant:
+Five rubrics - four from published work plus one controlled variant:
 
-| ID | File | Scale | Purpose |
-|---|---|---|---|
-| R1 | `rubric1_pemat.json` | Binary | Patient-facing understandability / actionability (PEMAT) |
-| R2 | `rubric2_healthbench.json` | Binary | Clinical correctness, safety, escalation, uncertainty (HealthBench) |
-| R3 | `rubric3_clinical_eval.json` | Likert 1-5 | Accuracy, safety, relevance, completeness, clarity (ClinicalEval) |
-| R4 | `rubric4_prometheus.json` | Likert 1-5 | Instruction-following, factuality, coherence, completeness (Prometheus) |
-| R5 | `rubric5_pemat_likert.json` | Likert 1-5 | Same PEMAT criteria as R1 -- controlled scale comparison |
-
-R5 isolates the scale effect: identical criteria, different scale => direct
-test of binary vs. Likert agreement.
-
----
-
-## Judge Panel
-
-Four locally deployable SLMs spanning three distinct base architectures
-(paper Sec 4):
-
-| Judge ID | Model | Reference |
+| id | scale | what it measures |
 |---|---|---|
-| `medgemma` | `google/medgemma-4b-it` | sellergren2025medgemma |
-| `biomistral` | `BioMistral/BioMistral-7B-DARE` | labrak2024biomistral |
-| `meditron` | `epfl-llm/meditron-7b` | chen2023meditron70b |
-| `medalpaca` | `medalpaca/medalpaca-7b` | han2023medalpaca |
+| R1 PEMAT | binary | patient understandability + actionability |
+| R2 HealthBench | binary | clinical correctness, safety, escalation |
+| R3 ClinicalEval | Likert 1-5 | accuracy, safety, relevance, completeness |
+| R4 Prometheus | Likert 1-5 | factuality, coherence, instruction-following |
+| R5 PEMAT-Likert | Likert 1-5 | same criteria as R1, different scale |
 
-All models are served via local vLLM / FastAPI endpoints -- no data leaves
-your infrastructure.
-
----
-
-## Agreement Thresholds (paper Sec 4)
-
-Calibrated for a four-judge panel:
-
-| Threshold | Value | Meaning |
-|---|---|---|
-| FA | 0.95 | Near-unanimous; virtually no systematic disagreement |
-| MA | 0.75 | Supermajority; panel broadly converges even if one judge diverges |
-| SP | 0.50 | Coin-flip boundary; no stable majority below this point |
-
-Thresholds are fully configurable via `agreement_thresholds` in the experiment
-config JSON. Two or more thresholds set to the same value merge the corresponding
-levels.
+R1 vs R5 is the controlled pair for the scale-effect analysis in Exp3.
 
 ---
 
-## Repository Structure
+## Benchmark
 
-```text
-core/
-  wrapper.py                 # Judge-panel orchestration (3-stage scoring)
-  model_adapters.py          # Per-model prompt/parse adapters
-  rubric_engine.py           # Agr (Eq.1), S (Eq.2), outlier strategies
-  agreement.py               # Panel agreement taxonomy and routing gate
-  consensus_core/            # Dataclasses, event log, in-memory store
+100 questions from MedQuAD, MedDialog, and Medical Meadow. 20 per domain:
+Cardiology, Pharmacology, Neurology, Pediatrics, Emergency.
 
-config/
-  endpoint_config.py         # Default local judge endpoints (4 SLMs)
-  llm_client.py              # Lightweight OpenAI-compatible HTTP client
-  configs/                   # Per-experiment JSON configs
-
-benchmark_dataset/
-  build_agreement_dataset.py # Reproducible 100-Q benchmark builder
-  source_datasets/           # Place MedQuAD / MedDialog / Medical Meadow CSVs here
-
-rubrics/
-  rubric1_pemat.json
-  rubric2_healthbench.json
-  rubric3_clinical_eval.json
-  rubric4_prometheus.json
-  rubric5_pemat_likert.json
-
-experiments/
-  demo_agreement_showcases.py   # No-LLM walkthrough of all agreement levels
-  exp1_dataset_analysis.py      # Table 1: rubric results at default scale
-  exp2_agreement_analysis.py    # Table 2: scoring-scale sensitivity
-  exp3_rubric_sensitivity.py    # Table 3: agreement by clinical domain
-  exp4_boxplot_agreement.py     # Box-plot figures (reads Exp2 output)
-
-tests/
-  test_core.py
-```
+Script to reproduce: `benchmark_dataset/build_agreement_dataset.py`
 
 ---
 
-## Quick Start
+## Running it
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 
-# No LLM required -- runs tests, builds benchmark, walks through agreement levels
-python3 tests/test_core.py
-python3 benchmark_dataset/build_agreement_dataset.py
-python3 experiments/demo_agreement_showcases.py
+# sanity check without any models
+python tests/test_core.py
+python benchmark_dataset/build_agreement_dataset.py
+python experiments/demo_agreement_showcases.py
 
-# Full pipeline (requires judge endpoints on ports 8001-8004)
+# full run (needs judge servers on ports 8001-8004)
 bash run_all.sh
 ```
 
----
-
-## Experiments
-
-| Experiment | Script | Requires LLMs? | Paper Table |
-|---|---|---|---|
-| Exp1 | `experiments/exp1_dataset_analysis.py` | No | Table 1 (default-scale results) |
-| Exp2 | `experiments/exp2_agreement_analysis.py` | Yes | Table 2 (scale sensitivity) |
-| Exp3 | `experiments/exp3_rubric_sensitivity.py` | Yes | Table 3 (domain breakdown) |
-| Exp4 | `experiments/exp4_boxplot_agreement.py` | No (reads Exp2) | Figures |
-| Demo | `experiments/demo_agreement_showcases.py` | No | -- |
+Each experiment reads a config JSON from `config/configs/`. The config specifies which judges, which rubrics, and the agreement thresholds. Default thresholds: FA=0.95, MA=0.75, SP=0.50.
 
 ---
 
-## Key Findings
+## Repo layout
 
-- Binary rubrics consistently yield higher inter-judge agreement (PEMAT 94.1%,
-  HealthBench 91.3%) than Likert-scale rubrics (ClinicalEval 80.9%,
-  Prometheus 74.0%, PEMAT-Likert 72.2%).
-- PEMAT vs PEMAT-Likert (identical criteria, different scale) isolates the scale
-  effect: switching from binary to Likert 1-5 drops mean agreement by 22 pp.
-- Cardiology is the most consistently judged domain (36% Full Agreement,
-  0 Full Disagreements); Pharmacology is the most contested (20% FA, 38%
-  combined Split + Full Disagreement).
-- Pharmacology contention is driven primarily by Likert-scale rubrics (ClinicalEval
-  13, PEMAT-Likert 14 split/disagree cases); binary rubrics show only 2-3 even
-  in this domain.
+```
+core/
+  wrapper.py          - runs the full panel for one question
+  rubric_engine.py    - Agr (Eq.1) + S (Eq.2) + outlier handling
+  agreement.py        - agreement thresholds and routing
+  model_adapters.py   - per-model prompt builders and parsers
+  metrics.py          - logging / result collection
+
+config/
+  endpoint_config.py  - judge endpoint definitions
+  configs/            - per-experiment JSON configs
+
+benchmark_dataset/
+  build_agreement_dataset.py
+
+rubrics/              - five rubric JSON files
+experiments/          - exp1 through exp4 + demo script
+tests/
+```
 
 ---
 
-## Ethical Considerations
+## Main results
 
-This repository is research infrastructure for evaluating clinical NLP systems.
-It does not provide, endorse, or validate medical advice. All benchmark questions
-are drawn from publicly available datasets. Any clinical deployment would require
-physician validation and regulatory review.
+Binary rubrics agree more than Likert ones. PEMAT (binary) hit 94.1% mean agreement; PEMAT-Likert (same criteria, 1-5 scale) dropped to 72.2% - a 22 pp gap from scale alone. Cardiology was the most consistently judged domain; Pharmacology was the hardest, mainly on Likert rubrics.
 
-All experiments use locally deployed models -- no patient-identifiable text is
-transmitted to external services, consistent with HIPAA and institutional
-data-governance principles.
+---
 
-To support reproducibility, code, prompts, and evaluation scripts are released
-here. Model checkpoints are not redistributed and must be obtained from their
-original sources in compliance with their respective licences.
+## Notes
+
+This is research infrastructure, not a clinical tool. Nothing here should be used for actual patient care decisions. All benchmark data is from public datasets. Models are not redistributed - download them from HuggingFace under their respective licences.
