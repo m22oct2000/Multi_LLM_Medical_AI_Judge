@@ -1,6 +1,6 @@
 # Multi-SLM Medical AI Judge
 
-Code for the paper *"Consensus-Driven Medical Answer Evaluation: A Multi-SLM Judge Framework for Privacy-Preserving, Local Deployment"* (EMNLP 2026 submission).
+Code for a paper currently under review.
 
 The core idea: instead of sending clinical QA answers to a cloud model for evaluation (HIPAA risk, no offline support), run a panel of small locally-deployed medical LLMs and only report a quality score when the panel sufficiently agrees. When they disagree, route to a human reviewer.
 
