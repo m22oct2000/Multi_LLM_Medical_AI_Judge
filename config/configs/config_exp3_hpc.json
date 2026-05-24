@@ -1,6 +1,15 @@
 {
-  "experiment": "exp3_rubric_sensitivity",
-  "description": "HPC variant: Rubric sensitivity analysis.",
+  "experiment": "exp3_rubric_sensitivity_hpc",
+  "description": "HPC run of Exp3 -- scoring-scale sensitivity study. Controlled pair: R1 (PEMAT binary) vs R5 (PEMAT Likert). Cross-rubric variants: BINARY, LIKERT_1_5, SCALED_0_10.",
+  "scoring_sensitivity_design": {
+    "controlled_pair": {
+      "rubric_binary": "rubrics/rubric1_pemat.json",
+      "rubric_likert": "rubrics/rubric5_pemat_likert.json"
+    },
+    "cross_rubric_variants": {
+      "variants": ["BINARY", "LIKERT_1_5", "SCALED_0_10"]
+    }
+  },
   "judges": [
     {
       "id": "medgemma",
@@ -9,7 +18,7 @@
     },
     {
       "id": "biomistral",
-      "model": "BioMistral/BioMistral-7B",
+      "model": "BioMistral/BioMistral-7B-DARE",
       "url": "http://localhost:8002"
     },
     {
@@ -25,22 +34,15 @@
   ],
   "rubrics": [
     "rubrics/rubric1_pemat.json",
-    "rubrics/rubric2_healthbench.json",
-    "rubrics/rubric3_clinical_eval.json",
-    "rubrics/rubric4_prometheus.json",
     "rubrics/rubric5_pemat_likert.json"
   ],
-  "scoring_variants": [
-    "BINARY",
-    "LIKERT_1_5",
-    "SCALED_0_10"
-  ],
-  "agreement_threshold": 80.0,
+  "scoring_variants": ["BINARY", "LIKERT_1_5", "SCALED_0_10"],
+  "agreement_thresholds": { "FA": 0.95, "MA": 0.75, "SP": 0.50 },
   "temperature": 0.0,
   "max_tokens": 1024,
   "timeout_seconds": 120,
   "output_files": {
-    "results_json": "results/exp3_sensitivity_results.json",
-    "figure_dir": "results/figures"
+    "results_json": "results/exp3_sensitivity_results_hpc.json",
+    "figure_dir": "results/figures/hpc"
   }
 }

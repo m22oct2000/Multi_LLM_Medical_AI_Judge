@@ -1,6 +1,6 @@
 {
-  "experiment": "exp2_agreement_analysis",
-  "description": "HPC variant: Run all small local medical judges on broad clinical QA rows under four published rubrics plus the PEMAT-Likert controlled scoring variant. Classify agreement per question across 5 clinical domains.",
+  "experiment": "exp2_agreement_analysis_hpc",
+  "description": "HPC run of Exp2 -- all four SLM judges on the 100-question benchmark under five rubrics. Classify panel agreement per question across five clinical domains.",
   "judges": [
     {
       "id": "medgemma",
@@ -9,7 +9,7 @@
     },
     {
       "id": "biomistral",
-      "model": "BioMistral/BioMistral-7B",
+      "model": "BioMistral/BioMistral-7B-DARE",
       "url": "http://localhost:8002"
     },
     {
@@ -31,20 +31,14 @@
     "rubrics/rubric5_pemat_likert.json"
   ],
   "benchmark_csv": "benchmark_dataset/agreement_benchmark.csv",
-  "domains": [
-    "Cardiology",
-    "Pharmacology",
-    "Neurology",
-    "Pediatrics",
-    "Emergency"
-  ],
-  "agreement_threshold": 80.0,
+  "domains": ["Cardiology", "Pharmacology", "Neurology", "Pediatrics", "Emergency"],
+  "agreement_thresholds": { "FA": 0.95, "MA": 0.75, "SP": 0.50 },
   "temperature": 0.0,
   "max_tokens": 1024,
   "timeout_seconds": 120,
   "print_rationales": true,
   "output_files": {
-    "results_json": "results/exp2_agreement_results.json",
-    "figure_dir": "results/figures"
+    "results_json": "results/exp2_agreement_results_hpc.json",
+    "figure_dir": "results/figures/hpc"
   }
 }

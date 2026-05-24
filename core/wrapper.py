@@ -1,27 +1,28 @@
-"""Clinical judge runner — runs the full judge panel for one QA/rubric triple.
+"""Clinical judge runner -- runs the full judge panel for one QA/rubric triple.
 
 Three-stage scoring strategy
 -----------------------------
-Stage 1 — Batch pass
+Stage 1 -- Batch pass
   All judges except SKIP_BATCH ones send a single prompt covering all rubric
-  items.  Concurrent via ThreadPoolExecutor.
+  items. Concurrent via ThreadPoolExecutor.
 
-Stage 2 — Per-item retry
+Stage 2 -- Per-item retry
   Any item that still has an NA score after stage 1 gets its own focused
-  prompt via adapter.build_item_messages().  SKIP_BATCH judges enter here
-  directly.  Concurrent via ThreadPoolExecutor.
+  prompt via adapter.build_item_messages(). SKIP_BATCH judges enter here
+  directly. Concurrent via ThreadPoolExecutor.
 
-Stage 3 — Hard-split pass  (NEW in v4)
+Stage 3 -- Hard-split pass
   Any item that STILL has an NA score after stage 2 gets one absolute-minimum
-  prompt via adapter.build_split_item_messages() — contains only the scale,
-  criterion name+description, Q (truncated), A (truncated), and a primed ID
-  prefix.  This guarantees every model produces a numeric score for every
-  rubric item, regardless of prompt complexity issues.
+  prompt via adapter.build_split_item_messages(). This guarantees every model
+  produces a numeric score for every rubric item.
 
-Routing
--------
-  Completion models: POST /v1/completions
-  MedGemma per-item / split: POST /v1/chat/completions (adapter.ITEM_ENDPOINT)
+Routing (paper Sec 3 / Fig. 1)
+-------------------------------
+  After scoring, compute Agr (Eq.1) across all N judges.
+  Four levels: Full Agreement (FA>=0.95) | Majority Agreement (MA>=0.75)
+               Split (SP>=0.50)          | Disagree (D<0.50)
+  Quality score S (Eq.2) is only reported when Agr >= MA_THRESHOLD (0.75).
+  Below that, the system routes to human review.
 
 Pre-flight
 ----------
@@ -45,7 +46,10 @@ from core.consensus_core.models import (
 from core.consensus_core.events import EventLog, append_judgment_recorded, append_agreement_classified
 from core.consensus_core.repository import InMemoryStore
 from core.rubric_engine import DynamicRubricParser
-from core.agreement import classify_panel_agreement, summarize_agreement
+from core.agreement import (
+    compute_agr, summarize_agreement,
+    FA_THRESHOLD, MA_THRESHOLD, SP_THRESHOLD,
+)
 from core.metrics import get_metrics_collector
 from core.model_adapters import get_adapter, ENDPOINT_CHAT, ENDPOINT_COMPLETION
 
@@ -70,10 +74,12 @@ class PanelResult:
     rubric_name: str
     rubric_source_paper: str
     judge_results: List[JudgeResult]
-    agreement_summary: Dict
-    agreement_class: str
+    agreement_summary: Dict        # full summarize_agreement() output
+    agreement_class: str           # 'full_agree'|'majority_agree'|'split'|'disagree'
     outlier_judge: Optional[str]
-    mean_pairwise_agreement: float
+    agr: float                     # Agr in [0,1] per paper Eq.1
+    quality_score: Optional[float] # S in [0,1] per paper Eq.2; None if Agr < MA
+    report_score: bool             # True when Agr >= MA_THRESHOLD
     events_jsonl: str
     skipped: bool = False
 
@@ -82,21 +88,34 @@ class PanelResult:
 
 
 def _is_na(score) -> bool:
-    """Return True if a score value is effectively missing/NA."""
     return str(score).upper().strip() in ('', 'NA', 'N/A', 'NONE')
 
 
 class ADRDJudgeRunner:
-    AGREEMENT_THRESHOLD  = 80.0
-    MIN_JUDGES_REQUIRED  = 2
+    """Orchestrates the full three-stage judge panel.
+
+    Agreement thresholds default to the paper values (FA=0.95, MA=0.75, SP=0.50)
+    but can be overridden via the experiment config JSON using the key
+    'agreement_thresholds': {'FA': ..., 'MA': ..., 'SP': ...}.
+    """
+    MIN_JUDGES_REQUIRED = 2
 
     def __init__(self, config_path: str):
         with open(config_path) as f:
             self.config: Dict[str, Any] = json.load(f)
         self.judges: List[Dict] = self.config['judges']
+        # Load thresholds from config or fall back to paper defaults
+        t = self.config.get('agreement_thresholds', {})
+        self.fa_threshold = float(t.get('FA', FA_THRESHOLD))
+        self.ma_threshold = float(t.get('MA', MA_THRESHOLD))
+        self.sp_threshold = float(t.get('SP', SP_THRESHOLD))
         self.metrics = get_metrics_collector()
         self.store   = InMemoryStore()
         logger.info(f'Clinical judge runner: {len(self.judges)} judges')
+        logger.info(
+            f'Agreement thresholds: FA={self.fa_threshold} '
+            f'MA={self.ma_threshold} SP={self.sp_threshold}'
+        )
         for j in self.judges:
             logger.info(f'  {j["id"]} | {j["model"]} | {j["url"]}')
 
@@ -189,7 +208,6 @@ class ADRDJudgeRunner:
         question_text: str,
         answer_text: str,
     ) -> Tuple[str, str, str, float]:
-        """Returns (judge_id, item_id, raw_response, latency_ms)."""
         judge, item = judge_item
         adapter  = get_adapter(judge['id'])
         msgs     = adapter.build_item_messages(item, question_text, answer_text)
@@ -203,7 +221,7 @@ class ADRDJudgeRunner:
         return judge['id'], item.id, raw_i, lat_i
 
     # ------------------------------------------------------------------
-    # Stage 3 helper: one hard-split call (minimum possible prompt)
+    # Stage 3 helper: one hard-split call
     # ------------------------------------------------------------------
 
     def _do_one_split(
@@ -212,18 +230,10 @@ class ADRDJudgeRunner:
         question_text: str,
         answer_text: str,
     ) -> Tuple[str, str, str, float]:
-        """Returns (judge_id, item_id, raw_response, latency_ms).
-
-        Uses adapter.build_split_item_messages() which sends the absolute
-        minimum prompt: scale + criterion + Q (truncated) + A (truncated)
-        + primed ID prefix.  Designed for models that fail on multi-item or
-        even regular per-item prompts due to context-window pressure.
-        """
         judge, item = judge_item
         adapter  = get_adapter(judge['id'])
         msgs     = adapter.build_split_item_messages(item, question_text, answer_text)
         extra    = adapter.extra_params_split()
-        # Split pass always uses the same endpoint as per-item
         endpoint = getattr(adapter, 'ITEM_ENDPOINT', adapter.ENDPOINT)
         try:
             raw_i, lat_i = self._call_judge(judge, msgs, extra, endpoint)
@@ -246,7 +256,7 @@ class ADRDJudgeRunner:
         live_judges = self._preflight_check()
         if len(live_judges) < self.MIN_JUDGES_REQUIRED:
             logger.error(
-                f'Only {len(live_judges)} judges live for Q={question.id} — skipping'
+                f'Only {len(live_judges)} judges live for Q={question.id} -- skipping'
             )
             return PanelResult(
                 question_id=question.id, question_text=question.text,
@@ -255,8 +265,8 @@ class ADRDJudgeRunner:
                 rubric_source_paper=rubric.source_paper,
                 judge_results=[], agreement_summary={},
                 agreement_class='skipped', outlier_judge=None,
-                mean_pairwise_agreement=0.0, events_jsonl='',
-                skipped=True,
+                agr=0.0, quality_score=None, report_score=False,
+                events_jsonl='', skipped=True,
             )
 
         log           = EventLog()
@@ -273,7 +283,7 @@ class ADRDJudgeRunner:
             if getattr(adapter, 'SKIP_BATCH', False):
                 skip_batch_judges.append(judge['id'])
                 logger.info(
-                    f'Judge {judge["id"]}: SKIP_BATCH=True — going straight to per-item mode'
+                    f'Judge {judge["id"]}: SKIP_BATCH=True -- going straight to per-item mode'
                 )
             else:
                 messages = adapter.build_messages(rubric.items, question.text, answer.text)
@@ -301,7 +311,6 @@ class ADRDJudgeRunner:
                     raw_responses[jid] = (raw, lat)
                     logger.info(f'Judge {jid} batch returned {len(raw)} chars in {lat:.0f}ms')
 
-        # SKIP_BATCH judges: seed empty so all their items go to per-item
         for jid in skip_batch_judges:
             if jid in live_judges:
                 raw_responses[jid] = ('', 0.0)
@@ -330,7 +339,7 @@ class ADRDJudgeRunner:
             n_skip = sum(1 for (j, _) in stage2_calls if j['id'] in skip_batch_judges)
             n_real = len(stage2_calls) - n_skip
             logger.info(
-                f'Stage 2 per-item: {len(stage2_calls)} item(s) — '
+                f'Stage 2 per-item: {len(stage2_calls)} item(s) -- '
                 f'{n_skip} SKIP_BATCH, {n_real} genuine NA retries'
             )
             with ThreadPoolExecutor(max_workers=max(1, len(active_judges))) as pool:
@@ -349,7 +358,7 @@ class ADRDJudgeRunner:
                         item_results_per_judge[jid][iid] = new_sc
 
         # ------------------------------------------------------------------ #
-        # Stage 3: Hard-split pass — one minimal call per still-NA item      #
+        # Stage 3: Hard-split pass                                            #
         # ------------------------------------------------------------------ #
         stage3_calls: List[Tuple[Dict, RubricItem]] = []
         for judge in active_judges:
@@ -360,7 +369,7 @@ class ADRDJudgeRunner:
 
         if stage3_calls:
             logger.info(
-                f'Stage 3 hard-split: {len(stage3_calls)} item(s) still NA — '
+                f'Stage 3 hard-split: {len(stage3_calls)} item(s) still NA -- '
                 f'sending minimum single-criterion prompts'
             )
             with ThreadPoolExecutor(max_workers=max(1, len(active_judges))) as pool:
@@ -372,8 +381,7 @@ class ADRDJudgeRunner:
                     jid, iid, raw_i, _ = fut.result()
                     if not raw_i.strip():
                         logger.warning(
-                            f'Hard-split returned empty for {jid}/{iid} — '
-                            f'leaving as NA'
+                            f'Hard-split returned empty for {jid}/{iid} -- leaving as NA'
                         )
                         continue
                     adapter = get_adapter(jid)
@@ -381,26 +389,23 @@ class ADRDJudgeRunner:
                     new_sc  = adapter.parse_item(raw_i, item, jid)
                     if not _is_na(new_sc.score):
                         item_results_per_judge[jid][iid] = new_sc
-                        logger.info(
-                            f'Hard-split recovered {jid}/{iid} = {new_sc.score}'
-                        )
+                        logger.info(f'Hard-split recovered {jid}/{iid} = {new_sc.score}')
                     else:
                         logger.warning(
                             f'Hard-split could not recover {jid}/{iid} '
-                            f'(raw: {raw_i[:60]!r}) — keeping NA'
+                            f'(raw: {raw_i[:60]!r}) -- keeping NA'
                         )
 
         # ------------------------------------------------------------------ #
-        # Build JudgeResult objects                                           #
+        # Build JudgeResult objects + collect scores for Agr                 #
         # ------------------------------------------------------------------ #
         judges_with_output: List[str] = []
         for judge in active_judges:
             jid      = judge['id']
             raw, lat = raw_responses.get(jid, ('', 0.0))
-            adapter  = get_adapter(jid)
 
             judge_scores = [item_results_per_judge[jid][it.id] for it in rubric.items]
-            agg          = parser.aggregate_score(judge_scores)
+            agg          = parser.aggregate_score(judge_scores)  # legacy log field
             rationales   = {s.rubric_item_id: (s.rationale or '') for s in judge_scores}
 
             scored_count = sum(1 for s in judge_scores if not _is_na(s.score))
@@ -409,12 +414,12 @@ class ADRDJudgeRunner:
 
             print(f"\n{'='*60}")
             print(f'JUDGE: {jid} | RUBRIC: {rubric.name} | Q: {question.id}')
-            print(f'Aggregate Score: {agg:.2f}')
+            print(f'Aggregate Score (legacy): {agg:.2f}')
             if raw:
                 preview = raw[:300] + ('...' if len(raw) > 300 else '')
                 print(f'Raw ({len(raw)} chars): {preview}')
             else:
-                print('Raw: (per-item / split mode — no batch response)')
+                print('Raw: (per-item / split mode -- no batch response)')
             for s in judge_scores:
                 flag = ' \u26a0\ufe0f NA' if _is_na(s.score) else ''
                 print(f'  [{s.rubric_item_id}] score={s.score}{flag} | '
@@ -449,36 +454,63 @@ class ADRDJudgeRunner:
             )
 
         # ------------------------------------------------------------------ #
-        # Pairwise agreement                                                  #
+        # Paper Eq.1: compute Agr in [0,1] using kappa-normalised pairwise   #
         # ------------------------------------------------------------------ #
         judge_ids = list(all_scores.keys())
-        pairwise: Dict[Tuple[str, str], float] = {}
-        for ja, jb in combinations(judge_ids, 2):
-            sc = parser.calculate_pairwise_agreement(all_scores[ja], all_scores[jb])
-            pairwise[(ja, jb)] = sc
-            pairwise[(jb, ja)] = sc
 
-        agreement_class, outlier = classify_panel_agreement(
-            pairwise, judge_ids, self.AGREEMENT_THRESHOLD
+        # Build {judge_id: {criterion_id: raw_score}} for compute_agr
+        judge_scores_dict: Dict[str, Dict[str, float]] = {}
+        for jid in judge_ids:
+            judge_scores_dict[jid] = parser.build_judge_scores_dict(
+                jid, all_scores[jid]
+            )
+
+        summary = summarize_agreement(
+            judge_scores_dict,
+            parser.kappa,
+            fa=self.fa_threshold,
+            ma=self.ma_threshold,
+            sp=self.sp_threshold,
         )
-        summary  = summarize_agreement(pairwise, judge_ids, self.AGREEMENT_THRESHOLD)
-        mean_pw  = summary['mean_pairwise_agreement']
+        agr             = summary['agr']
+        agreement_class = summary['agreement_level']
+        outlier         = summary['outlier_judge']
+        report_score    = summary['report_score']
+
+        # Paper Eq.2: quality score S -- only when Agr >= MA
+        quality_score = parser.compute_quality_score(
+            all_scores,
+            agr=agr,
+            ma_threshold=self.ma_threshold,
+            outlier_strategy='downweight' if outlier else 'include',
+            outlier_judge=outlier,
+        )
+
+        print(f"\n{'='*60}")
+        print(f'PANEL AGREEMENT: {agreement_class.upper()} | Agr={agr:.4f}')
+        if outlier:
+            print(f'  Outlier judge: {outlier}')
+        if report_score:
+            print(f'  Quality Score S = {quality_score:.4f}')
+        else:
+            print('  Score withheld (Agr < MA) -- routing to human review')
+        print('='*60)
 
         append_agreement_classified(log, question.id, rubric.id,
-                                    agreement_class, outlier, mean_pw)
+                                    agreement_class, outlier, agr)
         self.store.put(question.id, log)
         self.metrics.record_agreement(
             question_id=question.id, rubric_id=rubric.id,
             judge_a=judge_ids[0] if judge_ids else '',
             judge_b=judge_ids[1] if len(judge_ids) > 1 else '',
-            agreement_score=mean_pw, agreement_class=agreement_class,
+            agreement_score=agr, agreement_class=agreement_class,
         )
 
         if outlier:
-            print(f'\n\u26a0\ufe0f  OUTLIER JUDGE: {outlier}')
             for jr in judge_results:
                 if jr.judge_id == outlier:
-                    print(f'   Score: {jr.aggregate_score:.2f}')
+                    print(f'\n\u26a0\ufe0f  OUTLIER JUDGE: {outlier}')
+                    print(f'   Aggregate Score: {jr.aggregate_score:.2f}')
                     for s in jr.scores:
                         print(f'   [{s["item_id"]}] {(s["rationale"] or "")[:120]}')
 
@@ -489,7 +521,7 @@ class ADRDJudgeRunner:
                 if adapter_max != config_max:
                     logger.warning(
                         f'Judge {judge["id"]}: config max_tokens={config_max} '
-                        f'ignored — adapter MAX_NEW_TOKENS={adapter_max} used'
+                        f'ignored -- adapter MAX_NEW_TOKENS={adapter_max} used'
                     )
 
         return PanelResult(
@@ -499,6 +531,6 @@ class ADRDJudgeRunner:
             rubric_source_paper=rubric.source_paper,
             judge_results=judge_results, agreement_summary=summary,
             agreement_class=agreement_class, outlier_judge=outlier,
-            mean_pairwise_agreement=mean_pw, events_jsonl=log.to_jsonl(),
-            skipped=False,
+            agr=agr, quality_score=quality_score, report_score=report_score,
+            events_jsonl=log.to_jsonl(), skipped=False,
         )

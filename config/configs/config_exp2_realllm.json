@@ -1,6 +1,6 @@
 {
   "experiment": "exp2_agreement_analysis_realllm",
-  "description": "CPU substitute run of Exp2 \u2014 same judge-id roles as the HPC config but each port serves a small open instruction-tuned LM that fits in 15 GB RAM. Used for end-to-end notebook validation on machines without GPUs.",
+  "description": "CPU substitute run of Exp2 -- same judge-id roles as the HPC config but each port serves a small open instruction-tuned LM that fits in 15 GB RAM. Used for end-to-end notebook validation on machines without GPUs.",
   "judges": [
     {
       "id": "medgemma",
@@ -31,14 +31,8 @@
     "rubrics/rubric5_pemat_likert.json"
   ],
   "benchmark_csv": "benchmark_dataset/agreement_benchmark_sample.csv",
-  "domains": [
-    "Cardiology",
-    "Pharmacology",
-    "Neurology",
-    "Pediatrics",
-    "Emergency"
-  ],
-  "agreement_threshold": 80.0,
+  "domains": ["Cardiology", "Pharmacology", "Neurology", "Pediatrics", "Emergency"],
+  "agreement_thresholds": { "FA": 0.95, "MA": 0.75, "SP": 0.50 },
   "temperature": 0.0,
   "max_tokens": 200,
   "timeout_seconds": 300,

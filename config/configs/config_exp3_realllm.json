@@ -7,11 +7,7 @@
       "rubric_likert": "rubrics/rubric5_pemat_likert.json"
     },
     "cross_rubric_variants": {
-      "variants": [
-        "BINARY",
-        "LIKERT_1_5",
-        "SCALED_0_10"
-      ]
+      "variants": ["BINARY", "LIKERT_1_5", "SCALED_0_10"]
     }
   },
   "judges": [
@@ -40,12 +36,8 @@
     "rubrics/rubric1_pemat.json",
     "rubrics/rubric5_pemat_likert.json"
   ],
-  "scoring_variants": [
-    "BINARY",
-    "LIKERT_1_5",
-    "SCALED_0_10"
-  ],
-  "agreement_threshold": 80.0,
+  "scoring_variants": ["BINARY", "LIKERT_1_5", "SCALED_0_10"],
+  "agreement_thresholds": { "FA": 0.95, "MA": 0.75, "SP": 0.50 },
   "temperature": 0.0,
   "max_tokens": 200,
   "timeout_seconds": 300,
